@@ -63,6 +63,9 @@ pub struct Settings {
     pub overlay_size: f32,
     /// Physical screen position; `None` until the user moves it.
     pub overlay_pos: Option<(i32, i32)>,
+    /// Windows: the tray icon has been moved out of the overflow once. After
+    /// that the user's own choice in taskbar settings is left alone.
+    pub tray_pinned: bool,
 }
 
 impl Default for Settings {
@@ -90,6 +93,7 @@ impl Default for Settings {
             overlay_opacity: 0.85,
             overlay_size: 1.0,
             overlay_pos: None,
+            tray_pinned: false,
         }
     }
 }
@@ -145,6 +149,7 @@ impl Settings {
                 ("overlay_on_top", _) => s.overlay_on_top = b,
                 ("overlay_opacity", Some(f)) => s.overlay_opacity = f,
                 ("overlay_size", Some(f)) => s.overlay_size = f,
+                ("tray_pinned", _) => s.tray_pinned = b,
                 ("overlay_pos", _) => {
                     s.overlay_pos = v
                         .split_once(',')
@@ -212,6 +217,7 @@ impl Settings {
             format!("overlay_opacity={}", self.overlay_opacity),
             format!("overlay_size={}", self.overlay_size),
             format!("overlay_pos={pos}"),
+            format!("tray_pinned={}", b(self.tray_pinned)),
         ];
         lines.join("\n") + "\n"
     }

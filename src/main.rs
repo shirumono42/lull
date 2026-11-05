@@ -136,6 +136,8 @@ struct App {
     /// Footer text listing the shortcuts (and any that failed to register).
     hint: String,
     last_hide: Option<Instant>,
+    /// Windows: next attempt to pin the tray icon, while still trying.
+    pin_retry: Option<(Instant, u32)>,
 }
 
 impl App {
@@ -175,6 +177,29 @@ impl App {
             hk_panel: ids[2],
             hint: hint.join("      "),
             last_hide: None,
+            pin_retry: None,
+        }
+    }
+
+    /// Windows: retries pinning the tray icon to the taskbar for ~30 s after
+    /// the first launch (Explorer registers new icons lazily).
+    fn try_pin_tray(&mut self, now: Instant) {
+        let Some((at, tries)) = self.pin_retry else { return };
+        if now < at {
+            return;
+        }
+        #[cfg(windows)]
+        let done = platform::promote_tray_icon();
+        #[cfg(not(windows))]
+        let done = true;
+        if done || tries >= 10 {
+            self.pin_retry = None;
+            if done {
+                self.settings.tray_pinned = true;
+                self.dirty = Some(now);
+            }
+        } else {
+            self.pin_retry = Some((now + Duration::from_secs(3), tries + 1));
         }
     }
 
@@ -631,6 +656,9 @@ impl ApplicationHandler<UserEvent> for App {
         // Tray icons must be created once the event loop is running (macOS).
         if self.tray.is_none() {
             self.create_tray();
+            if cfg!(windows) && self.tray.is_some() && !self.settings.tray_pinned {
+                self.pin_retry = Some((Instant::now() + Duration::from_millis(500), 0));
+            }
         }
     }
 
@@ -704,9 +732,11 @@ impl ApplicationHandler<UserEvent> for App {
             }
         }
 
+        self.try_pin_tray(now);
         let engine_at = self.engine.poll();
         self.refresh();
-        let wake = [engine_at, self.timer.next_tick(&plan, now), save_at].into_iter().flatten().min();
+        let pin_at = self.pin_retry.map(|(t, _)| t);
+        let wake = [engine_at, self.timer.next_tick(&plan, now), save_at, pin_at].into_iter().flatten().min();
         el.set_control_flow(match wake {
             Some(t) => ControlFlow::WaitUntil(t),
             None => ControlFlow::Wait,
