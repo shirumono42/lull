@@ -15,7 +15,7 @@ pub const PRESETS: [(&str, &str, f32); 4] = [
 pub const BEAT_RANGE: (f32, f32) = (0.5, 40.0);
 pub const CARRIER_RANGE: (f32, f32) = (60.0, 600.0);
 
-#[derive(Clone, Copy, PartialEq, Debug)]
+#[derive(Clone, PartialEq, Debug)]
 pub struct Settings {
     pub master: f32,
     pub noise_on: [bool; 3],
@@ -24,6 +24,9 @@ pub struct Settings {
     pub bin_vol: f32,
     pub beat: f32,
     pub carrier: f32,
+    /// Global shortcuts, e.g. `ctrl+alt+KeyN` (see the README).
+    pub hotkey_play: String,
+    pub hotkey_panel: String,
 }
 
 impl Default for Settings {
@@ -36,6 +39,8 @@ impl Default for Settings {
             bin_vol: 0.5,
             beat: 10.0,
             carrier: 200.0,
+            hotkey_play: "ctrl+alt+KeyN".into(),
+            hotkey_panel: "ctrl+alt+KeyL".into(),
         }
     }
 }
@@ -74,6 +79,8 @@ impl Settings {
                 ("pink_on", _) => s.noise_on[1] = b,
                 ("brown_on", _) => s.noise_on[2] = b,
                 ("binaural_on", _) => s.bin_on = b,
+                ("hotkey_play", _) => s.hotkey_play = v.trim().into(),
+                ("hotkey_panel", _) => s.hotkey_panel = v.trim().into(),
                 _ => {}
             }
         }
@@ -94,7 +101,8 @@ impl Settings {
         let b = |x: bool| x as u8;
         let text = format!(
             "master={}\nwhite={}\npink={}\nbrown={}\nbinaural={}\nbeat={}\ncarrier={}\n\
-             white_on={}\npink_on={}\nbrown_on={}\nbinaural_on={}\n",
+             white_on={}\npink_on={}\nbrown_on={}\nbinaural_on={}\n\
+             hotkey_play={}\nhotkey_panel={}\n",
             self.master,
             self.noise_vol[0],
             self.noise_vol[1],
@@ -106,10 +114,31 @@ impl Settings {
             b(self.noise_on[1]),
             b(self.noise_on[2]),
             b(self.bin_on),
+            self.hotkey_play,
+            self.hotkey_panel,
         );
         if let Some(dir) = p.parent() {
             let _ = std::fs::create_dir_all(dir);
         }
         let _ = std::fs::write(p, text);
     }
+}
+
+/// Turns `ctrl+alt+KeyN` into `Ctrl+Alt+N` (`Ctrl+Opt+N` on macOS).
+pub fn pretty_hotkey(spec: &str) -> String {
+    let mac = cfg!(target_os = "macos");
+    spec.split('+')
+        .map(|t| match t.trim().to_ascii_lowercase().as_str() {
+            "ctrl" | "control" => "Ctrl".to_string(),
+            "alt" | "option" => (if mac { "Opt" } else { "Alt" }).to_string(),
+            "shift" => "Shift".to_string(),
+            "super" | "cmd" | "command" | "meta" => (if mac { "Cmd" } else { "Win" }).to_string(),
+            "cmdorctrl" | "commandorcontrol" => (if mac { "Cmd" } else { "Ctrl" }).to_string(),
+            _ => {
+                let t = t.trim();
+                t.strip_prefix("Key").or_else(|| t.strip_prefix("Digit")).unwrap_or(t).to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("+")
 }

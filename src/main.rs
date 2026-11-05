@@ -8,7 +8,7 @@ use std::num::NonZeroU32;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
-use global_hotkey::hotkey::{Code, HotKey, Modifiers};
+use global_hotkey::hotkey::HotKey;
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
 use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
 use tray_icon::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
@@ -22,11 +22,6 @@ use winit::window::{Window, WindowId, WindowLevel};
 use audio::Engine;
 use settings::Settings;
 use ui::{Painter, Response, Ui};
-
-#[cfg(target_os = "macos")]
-const HINT: &str = "⌃⌥N  play / stop      ⌃⌥M  panel";
-#[cfg(not(target_os = "macos"))]
-const HINT: &str = "Ctrl+Alt+N  play / stop      Ctrl+Alt+M  panel";
 
 enum UserEvent {
     Hotkey(GlobalHotKeyEvent),
@@ -61,22 +56,28 @@ struct App {
     _hotkeys: Option<GlobalHotKeyManager>,
     hk_play: u32,
     hk_panel: u32,
+    /// Footer text listing the shortcuts (and any that failed to register).
+    hint: String,
     last_hide: Option<Instant>,
 }
 
 impl App {
     fn new() -> Self {
         let settings = Settings::load();
-        let mods = Some(Modifiers::CONTROL | Modifiers::ALT);
-        let play = HotKey::new(mods, Code::KeyN);
-        let panel = HotKey::new(mods, Code::KeyM);
+        let defaults = Settings::default();
+        let parse = |spec: &str, fallback: &str| {
+            spec.parse::<HotKey>()
+                .map(|hk| (hk, spec.to_string()))
+                .unwrap_or_else(|_| (fallback.parse().unwrap(), fallback.to_string()))
+        };
+        let (play, play_spec) = parse(&settings.hotkey_play, &defaults.hotkey_play);
+        let (panel, panel_spec) = parse(&settings.hotkey_panel, &defaults.hotkey_panel);
         let hotkeys = GlobalHotKeyManager::new().ok();
-        if let Some(m) = &hotkeys {
-            for hk in [play, panel] {
-                if let Err(e) = m.register(hk) {
-                    eprintln!("lull: could not register hotkey: {e}");
-                }
-            }
+        let mut hint = Vec::new();
+        for (hk, spec, what) in [(play, play_spec, "play / stop"), (panel, panel_spec, "panel")] {
+            let ok = hotkeys.as_ref().is_some_and(|m| m.register(hk).is_ok());
+            let busy = if ok { "" } else { " (in use)" };
+            hint.push(format!("{}{busy}  {what}", settings::pretty_hotkey(&spec)));
         }
         App {
             engine: Engine::new(&settings),
@@ -87,6 +88,7 @@ impl App {
             _hotkeys: hotkeys,
             hk_play: play.id(),
             hk_panel: panel.id(),
+            hint: hint.join("      "),
             last_hide: None,
         }
     }
@@ -258,7 +260,7 @@ impl App {
             return;
         }
         p.painter.resize(size.width, size.height, p.window.scale_factor() as f32);
-        p.ui.draw(&mut p.painter, &self.settings, playing, HINT);
+        p.ui.draw(&mut p.painter, &self.settings, playing, &self.hint);
         if let Ok(mut buf) = p.surface.buffer_mut() {
             p.painter.blit(&mut buf);
             let _ = buf.present();
