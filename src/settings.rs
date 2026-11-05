@@ -1,6 +1,9 @@
 //! User settings, persisted as a tiny `key=value` text file.
 
 use std::path::PathBuf;
+use std::time::Duration;
+
+use crate::pomodoro::Plan;
 
 pub const NOISE_NAMES: [&str; 3] = ["White", "Pink", "Brown"];
 
@@ -12,8 +15,21 @@ pub const PRESETS: [(&str, &str, f32); 4] = [
     ("Beta", "β", 20.0),
 ];
 
+/// Pomodoro presets: (focus, break, long break, rounds), minutes.
+pub const POMO_PRESETS: [(f32, f32, f32, f32); 4] = [
+    (25.0, 5.0, 15.0, 4.0),
+    (50.0, 10.0, 30.0, 3.0),
+    (52.0, 17.0, 30.0, 3.0),
+    (90.0, 20.0, 30.0, 2.0),
+];
+
 pub const BEAT_RANGE: (f32, f32) = (0.5, 40.0);
 pub const CARRIER_RANGE: (f32, f32) = (60.0, 600.0);
+pub const FOCUS_RANGE: (f32, f32) = (1.0, 120.0);
+pub const BREAK_RANGE: (f32, f32) = (1.0, 60.0);
+pub const ROUNDS_RANGE: (f32, f32) = (1.0, 8.0);
+pub const OPACITY_RANGE: (f32, f32) = (0.2, 1.0);
+pub const OVERLAY_SIZE_RANGE: (f32, f32) = (0.6, 3.0);
 
 #[derive(Clone, PartialEq, Debug)]
 pub struct Settings {
@@ -27,6 +43,26 @@ pub struct Settings {
     /// Global shortcuts, e.g. `ctrl+alt+KeyN` (see the README).
     pub hotkey_play: String,
     pub hotkey_panel: String,
+    pub hotkey_timer: String,
+
+    // Pomodoro, in minutes.
+    pub focus_min: f32,
+    pub break_min: f32,
+    pub long_min: f32,
+    pub rounds: f32,
+    /// Start the sound when a focus session starts (and pause it with the timer).
+    pub sound_on_focus: bool,
+    /// Stop the sound when a focus session (or the whole timer) ends.
+    pub sound_off_at_end: bool,
+    pub chime: bool,
+
+    // On-screen timer.
+    pub overlay: bool,
+    pub overlay_on_top: bool,
+    pub overlay_opacity: f32,
+    pub overlay_size: f32,
+    /// Physical screen position; `None` until the user moves it.
+    pub overlay_pos: Option<(i32, i32)>,
 }
 
 impl Default for Settings {
@@ -41,6 +77,19 @@ impl Default for Settings {
             carrier: 200.0,
             hotkey_play: "ctrl+alt+KeyN".into(),
             hotkey_panel: "ctrl+alt+KeyL".into(),
+            hotkey_timer: "ctrl+alt+KeyP".into(),
+            focus_min: 25.0,
+            break_min: 5.0,
+            long_min: 15.0,
+            rounds: 4.0,
+            sound_on_focus: true,
+            sound_off_at_end: true,
+            chime: true,
+            overlay: false,
+            overlay_on_top: true,
+            overlay_opacity: 0.85,
+            overlay_size: 1.0,
+            overlay_pos: None,
         }
     }
 }
@@ -59,14 +108,17 @@ fn path() -> Option<PathBuf> {
 
 impl Settings {
     pub fn load() -> Self {
+        let text = path().and_then(|p| std::fs::read_to_string(p).ok()).unwrap_or_default();
+        Self::parse(&text)
+    }
+
+    fn parse(text: &str) -> Self {
         let mut s = Settings::default();
-        let Some(text) = path().and_then(|p| std::fs::read_to_string(p).ok()) else {
-            return s;
-        };
         for line in text.lines() {
             let Some((k, v)) = line.split_once('=') else { continue };
-            let f = v.trim().parse::<f32>().ok().filter(|f| f.is_finite());
-            let b = v.trim() == "1";
+            let v = v.trim();
+            let f = v.parse::<f32>().ok().filter(|f| f.is_finite());
+            let b = v == "1";
             match (k.trim(), f) {
                 ("master", Some(f)) => s.master = f,
                 ("white", Some(f)) => s.noise_vol[0] = f,
@@ -79,8 +131,25 @@ impl Settings {
                 ("pink_on", _) => s.noise_on[1] = b,
                 ("brown_on", _) => s.noise_on[2] = b,
                 ("binaural_on", _) => s.bin_on = b,
-                ("hotkey_play", _) => s.hotkey_play = v.trim().into(),
-                ("hotkey_panel", _) => s.hotkey_panel = v.trim().into(),
+                ("hotkey_play", _) => s.hotkey_play = v.into(),
+                ("hotkey_panel", _) => s.hotkey_panel = v.into(),
+                ("hotkey_timer", _) => s.hotkey_timer = v.into(),
+                ("focus_min", Some(f)) => s.focus_min = f,
+                ("break_min", Some(f)) => s.break_min = f,
+                ("long_min", Some(f)) => s.long_min = f,
+                ("rounds", Some(f)) => s.rounds = f,
+                ("sound_on_focus", _) => s.sound_on_focus = b,
+                ("sound_off_at_end", _) => s.sound_off_at_end = b,
+                ("chime", _) => s.chime = b,
+                ("overlay", _) => s.overlay = b,
+                ("overlay_on_top", _) => s.overlay_on_top = b,
+                ("overlay_opacity", Some(f)) => s.overlay_opacity = f,
+                ("overlay_size", Some(f)) => s.overlay_size = f,
+                ("overlay_pos", _) => {
+                    s.overlay_pos = v
+                        .split_once(',')
+                        .and_then(|(x, y)| Some((x.trim().parse().ok()?, y.trim().parse().ok()?)))
+                }
                 _ => {}
             }
         }
@@ -88,39 +157,71 @@ impl Settings {
     }
 
     fn clamp(mut self) -> Self {
-        self.master = self.master.clamp(0.0, 1.0);
-        self.bin_vol = self.bin_vol.clamp(0.0, 1.0);
-        self.noise_vol = self.noise_vol.map(|v| v.clamp(0.0, 1.0));
-        self.beat = self.beat.clamp(BEAT_RANGE.0, BEAT_RANGE.1);
-        self.carrier = self.carrier.clamp(CARRIER_RANGE.0, CARRIER_RANGE.1);
+        let c = |v: f32, (lo, hi): (f32, f32)| v.clamp(lo, hi);
+        self.master = c(self.master, (0.0, 1.0));
+        self.bin_vol = c(self.bin_vol, (0.0, 1.0));
+        self.noise_vol = self.noise_vol.map(|v| c(v, (0.0, 1.0)));
+        self.beat = c(self.beat, BEAT_RANGE);
+        self.carrier = c(self.carrier, CARRIER_RANGE);
+        self.focus_min = c(self.focus_min, FOCUS_RANGE).round();
+        self.break_min = c(self.break_min, BREAK_RANGE).round();
+        self.long_min = c(self.long_min, BREAK_RANGE).round();
+        self.rounds = c(self.rounds, ROUNDS_RANGE).round();
+        self.overlay_opacity = c(self.overlay_opacity, OPACITY_RANGE);
+        self.overlay_size = c(self.overlay_size, OVERLAY_SIZE_RANGE);
         self
+    }
+
+    pub fn plan(&self) -> Plan {
+        let m = |x: f32| Duration::from_secs((x * 60.0) as u64);
+        Plan {
+            focus: m(self.focus_min),
+            short: m(self.break_min),
+            long: m(self.long_min),
+            rounds: self.rounds as u32,
+        }
+    }
+
+    fn serialize(&self) -> String {
+        let b = |x: bool| x as u8;
+        let pos = self.overlay_pos.map(|(x, y)| format!("{x},{y}")).unwrap_or_default();
+        let lines = [
+            format!("master={}", self.master),
+            format!("white={}", self.noise_vol[0]),
+            format!("pink={}", self.noise_vol[1]),
+            format!("brown={}", self.noise_vol[2]),
+            format!("binaural={}", self.bin_vol),
+            format!("beat={}", self.beat),
+            format!("carrier={}", self.carrier),
+            format!("white_on={}", b(self.noise_on[0])),
+            format!("pink_on={}", b(self.noise_on[1])),
+            format!("brown_on={}", b(self.noise_on[2])),
+            format!("binaural_on={}", b(self.bin_on)),
+            format!("hotkey_play={}", self.hotkey_play),
+            format!("hotkey_panel={}", self.hotkey_panel),
+            format!("hotkey_timer={}", self.hotkey_timer),
+            format!("focus_min={}", self.focus_min),
+            format!("break_min={}", self.break_min),
+            format!("long_min={}", self.long_min),
+            format!("rounds={}", self.rounds),
+            format!("sound_on_focus={}", b(self.sound_on_focus)),
+            format!("sound_off_at_end={}", b(self.sound_off_at_end)),
+            format!("chime={}", b(self.chime)),
+            format!("overlay={}", b(self.overlay)),
+            format!("overlay_on_top={}", b(self.overlay_on_top)),
+            format!("overlay_opacity={}", self.overlay_opacity),
+            format!("overlay_size={}", self.overlay_size),
+            format!("overlay_pos={pos}"),
+        ];
+        lines.join("\n") + "\n"
     }
 
     pub fn save(&self) {
         let Some(p) = path() else { return };
-        let b = |x: bool| x as u8;
-        let text = format!(
-            "master={}\nwhite={}\npink={}\nbrown={}\nbinaural={}\nbeat={}\ncarrier={}\n\
-             white_on={}\npink_on={}\nbrown_on={}\nbinaural_on={}\n\
-             hotkey_play={}\nhotkey_panel={}\n",
-            self.master,
-            self.noise_vol[0],
-            self.noise_vol[1],
-            self.noise_vol[2],
-            self.bin_vol,
-            self.beat,
-            self.carrier,
-            b(self.noise_on[0]),
-            b(self.noise_on[1]),
-            b(self.noise_on[2]),
-            b(self.bin_on),
-            self.hotkey_play,
-            self.hotkey_panel,
-        );
         if let Some(dir) = p.parent() {
             let _ = std::fs::create_dir_all(dir);
         }
-        let _ = std::fs::write(p, text);
+        let _ = std::fs::write(p, self.serialize());
     }
 }
 
@@ -141,4 +242,28 @@ pub fn pretty_hotkey(spec: &str) -> String {
         })
         .collect::<Vec<_>>()
         .join("+")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn roundtrip() {
+        let mut s = Settings::default();
+        s.overlay_pos = Some((-120, 40));
+        s.focus_min = 50.0;
+        s.overlay = true;
+        s.noise_on = [true, false, true];
+        assert_eq!(Settings::parse(&s.serialize()), s);
+    }
+
+    #[test]
+    fn bad_values_are_clamped() {
+        let s = Settings::parse("focus_min=999\nrounds=0\noverlay_opacity=nan\noverlay_pos=abc");
+        assert_eq!(s.focus_min, 120.0);
+        assert_eq!(s.rounds, 1.0);
+        assert_eq!(s.overlay_opacity, Settings::default().overlay_opacity);
+        assert_eq!(s.overlay_pos, None);
+    }
 }
