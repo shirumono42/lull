@@ -77,7 +77,7 @@ impl Default for Settings {
             carrier: 200.0,
             hotkey_play: "ctrl+alt+KeyN".into(),
             hotkey_panel: "ctrl+alt+KeyL".into(),
-            hotkey_timer: "ctrl+alt+KeyP".into(),
+            hotkey_timer: "ctrl+alt+KeyT".into(),
             focus_min: 25.0,
             break_min: 5.0,
             long_min: 15.0,

@@ -1,15 +1,15 @@
 [package]
 name = "lull"
-version = "0.1.0"
+version = "0.2.0"
 description = "Tiny tray app for white/pink/brown noise and binaural beats"
 license = "MIT"
 repository = "https://github.com/shirumono42/lull"
 edition = "2024"
 
 [dependencies]
+ab_glyph = "0.2.32"
 cpal = "0.18"
 epaint_default_fonts = "0.37"
-fontdue = "0.9"
 global-hotkey = "0.9"
 softbuffer = "0.4"
 tiny-skia = "0.12"

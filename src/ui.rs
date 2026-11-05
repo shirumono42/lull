@@ -1,10 +1,11 @@
 //! The popup panel and the on-screen timer: a tiny UI drawn in software
-//! (tiny-skia shapes + fontdue text). Everything here is dropped while the
+//! (tiny-skia shapes + ab_glyph text). Everything here is dropped while the
 //! windows are hidden.
 
 use std::collections::HashMap;
 use std::time::Duration;
 
+use ab_glyph::{Font, FontRef, PxScale, ScaleFont};
 use tiny_skia::{FillRule, Paint, Path, PathBuilder, Pixmap, Transform};
 
 use crate::pomodoro::{Phase, clock};
@@ -700,8 +701,19 @@ pub enum Align {
 pub struct Painter {
     pub pix: Pixmap,
     scale: f32,
-    font: fontdue::Font,
-    glyphs: HashMap<(char, u16), (fontdue::Metrics, Vec<u8>)>,
+    /// Zero-copy view of the embedded font; outlines are read on demand.
+    font: FontRef<'static>,
+    glyphs: HashMap<(char, u16), Glyph>,
+}
+
+/// A rasterised glyph: coverage bitmap plus placement relative to the pen.
+struct Glyph {
+    left: i32,
+    top: i32,
+    w: usize,
+    h: usize,
+    advance: f32,
+    cov: Vec<u8>,
 }
 
 impl Painter {
@@ -709,8 +721,8 @@ impl Painter {
         Self::with_font(epaint_default_fonts::UBUNTU_LIGHT, scale)
     }
 
-    fn with_font(bytes: &[u8], scale: f32) -> Self {
-        let font = fontdue::Font::from_bytes(bytes, Default::default()).expect("embedded font");
+    fn with_font(bytes: &'static [u8], scale: f32) -> Self {
+        let font = FontRef::try_from_slice(bytes).expect("embedded font");
         let pix = Pixmap::new(1, 1).unwrap();
         Painter { pix, scale, font, glyphs: HashMap::new() }
     }
@@ -771,10 +783,33 @@ impl Painter {
         (size * self.scale).round().max(1.0) as u16
     }
 
+    /// ab_glyph scales by line height; convert from an em size in px.
+    fn px_scale(&self, px: f32) -> PxScale {
+        let em = self.font.units_per_em().unwrap_or(1000.0);
+        PxScale::from(px * self.font.height_unscaled() / em)
+    }
+
     /// Text width in logical px.
     fn measure(&self, size: f32, s: &str) -> f32 {
-        let px = self.px(size) as f32;
-        s.chars().map(|ch| self.font.metrics(ch, px).advance_width).sum::<f32>() / self.scale
+        let font = self.font.as_scaled(self.px_scale(self.px(size) as f32));
+        s.chars().map(|ch| font.h_advance(font.glyph_id(ch))).sum::<f32>() / self.scale
+    }
+
+    fn rasterize(&self, ch: char, px: u16) -> Glyph {
+        let scale = self.px_scale(px as f32);
+        let id = self.font.glyph_id(ch);
+        let advance = self.font.as_scaled(scale).h_advance(id);
+        let empty = Glyph { left: 0, top: 0, w: 0, h: 0, advance, cov: Vec::new() };
+        let Some(outline) = self.font.outline_glyph(id.with_scale(scale)) else { return empty };
+        let b = outline.px_bounds();
+        let (w, h) = (b.width() as usize, b.height() as usize);
+        let mut cov = vec![0u8; w * h];
+        outline.draw(|x, y, c| {
+            if let Some(v) = cov.get_mut(y as usize * w + x as usize) {
+                *v = (c.clamp(0.0, 1.0) * 255.0) as u8;
+            }
+        });
+        Glyph { left: b.min.x as i32, top: b.min.y as i32, w, h, advance, cov }
     }
 
     /// Draws text with its baseline at `y` (logical px).
@@ -790,25 +825,25 @@ impl Painter {
         let base = (y * self.scale).round() as i32;
         let (pw, ph) = (self.pix.width() as i32, self.pix.height() as i32);
         for ch in s.chars() {
-            let font = &self.font;
-            let (m, bmp) = self
-                .glyphs
-                .entry((ch, px))
-                .or_insert_with(|| font.rasterize(ch, px as f32));
-            let gx = pen.round() as i32 + m.xmin;
-            let gy = base - m.ymin - m.height as i32;
+            if !self.glyphs.contains_key(&(ch, px)) {
+                let g = self.rasterize(ch, px);
+                self.glyphs.insert((ch, px), g);
+            }
+            let g = &self.glyphs[&(ch, px)];
+            let gx = pen.round() as i32 + g.left;
+            let gy = base + g.top;
             let data = self.pix.data_mut();
-            for row in 0..m.height as i32 {
+            for row in 0..g.h as i32 {
                 let yy = gy + row;
                 if yy < 0 || yy >= ph {
                     continue;
                 }
-                for col in 0..m.width as i32 {
+                for col in 0..g.w as i32 {
                     let xx = gx + col;
                     if xx < 0 || xx >= pw {
                         continue;
                     }
-                    let cov = bmp[(row * m.width as i32 + col) as usize];
+                    let cov = g.cov[row as usize * g.w + col as usize];
                     if cov == 0 {
                         continue;
                     }
@@ -821,7 +856,7 @@ impl Painter {
                     }
                 }
             }
-            pen += m.advance_width;
+            pen += g.advance;
         }
     }
 
@@ -959,7 +994,7 @@ mod tests {
         s.bin_on = true;
         s.noise_on[2] = true;
         s.overlay = true;
-        let hint = "Ctrl+Alt+N  sound      Ctrl+Alt+P  timer      Ctrl+Alt+L  panel";
+        let hint = "Ctrl+Alt+N  sound      Ctrl+Alt+T  timer      Ctrl+Alt+L  panel";
         for (tab, name) in [(Tab::Sound, "sound.png"), (Tab::Timer, "timer.png")] {
             let mut p = Painter::new(2.0);
             p.resize((W * 2.0) as u32, (H * 2.0) as u32, 2.0);
