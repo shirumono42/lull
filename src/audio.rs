@@ -1,7 +1,7 @@
-//! Audio engine: white / pink / brown noise and binaural beats.
+//! Audio engine: white / pink / brown noise, binaural beats and a timer chime.
 //!
-//! The output stream only exists while playing. Stopping fades out and then
-//! drops the stream, so an idle app holds no audio device and uses no CPU.
+//! The output stream only exists while sound is needed. Stopping fades out and
+//! then drops the stream, so an idle app holds no audio device and uses no CPU.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering::Relaxed};
@@ -13,6 +13,7 @@ use cpal::{FromSample, SampleFormat, SizedSample};
 use crate::settings::Settings;
 
 const FADE_OUT: Duration = Duration::from_millis(350);
+const CHIME_LEN: f32 = 2.2;
 
 #[derive(Default)]
 struct AtomicF32(AtomicU32);
@@ -36,6 +37,8 @@ struct Shared {
     binaural: AtomicF32,
     beat: AtomicF32,
     carrier: AtomicF32,
+    /// Bumped to ring the chime once.
+    chime: AtomicU32,
 }
 
 pub struct Engine {
@@ -65,7 +68,7 @@ impl Engine {
     }
 
     pub fn is_playing(&self) -> bool {
-        self.stream.is_some() && self.stop_at.is_none()
+        self.stream.is_some() && self.shared.running.load(Relaxed)
     }
 
     pub fn toggle(&mut self) {
@@ -75,22 +78,39 @@ impl Engine {
     pub fn start(&mut self) {
         self.stop_at = None;
         self.shared.running.store(true, Relaxed);
-        if self.stream.is_none() {
-            match build_stream(self.shared.clone()) {
-                Ok(s) => self.stream = Some(s),
-                Err(e) => {
-                    eprintln!("lull: audio error: {e}");
-                    self.shared.running.store(false, Relaxed);
-                }
-            }
+        if !self.ensure_stream() {
+            self.shared.running.store(false, Relaxed);
         }
     }
 
     pub fn stop(&mut self) {
-        if self.stream.is_some() && self.stop_at.is_none() {
+        if self.is_playing() {
             self.shared.running.store(false, Relaxed);
             self.stop_at = Some(Instant::now() + FADE_OUT);
         }
+    }
+
+    /// Rings a short bell, opening the stream just for it if needed.
+    pub fn chime(&mut self) {
+        self.shared.chime.fetch_add(1, Relaxed);
+        if !self.is_playing() && self.ensure_stream() {
+            let end = Instant::now() + Duration::from_secs_f32(CHIME_LEN);
+            self.stop_at = Some(self.stop_at.map_or(end, |t| t.max(end)));
+        }
+    }
+
+    fn ensure_stream(&mut self) -> bool {
+        if self.stream.is_none() {
+            match build_stream(self.shared.clone()) {
+                Ok(s) => {
+                    self.stream = Some(s);
+                    #[cfg(windows)]
+                    opt_out_of_ducking();
+                }
+                Err(e) => eprintln!("lull: audio error: {e}"),
+            }
+        }
+        self.stream.is_some()
     }
 
     /// Drops the stream once the fade-out is over. Returns the next deadline.
@@ -102,6 +122,32 @@ impl Engine {
                 None
             }
             other => other,
+        }
+    }
+}
+
+/// Windows lowers "other sounds" whenever a voice-chat app is active. That
+/// silently changes Lull's level by several dB, so opt this session out.
+#[cfg(windows)]
+fn opt_out_of_ducking() {
+    use windows::Win32::Media::Audio::{
+        IAudioSessionControl2, IAudioSessionManager, IMMDeviceEnumerator, MMDeviceEnumerator,
+        eConsole, eRender,
+    };
+    use windows::Win32::System::Com::{CLSCTX_ALL, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx};
+    use windows::core::Interface;
+    unsafe {
+        // The UI thread is already in an STA; this is a no-op then.
+        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+        let result = (|| -> windows::core::Result<()> {
+            let en: IMMDeviceEnumerator = CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)?;
+            let dev = en.GetDefaultAudioEndpoint(eRender, eConsole)?;
+            let mgr: IAudioSessionManager = dev.Activate(CLSCTX_ALL, None)?;
+            let ctl = mgr.GetAudioSessionControl(None, 0)?;
+            ctl.cast::<IAudioSessionControl2>()?.SetDuckingPreference(true)
+        })();
+        if let Err(e) = result {
+            eprintln!("lull: could not opt out of ducking: {e}");
         }
     }
 }
@@ -164,6 +210,8 @@ where
 struct NoiseState {
     pink: [f32; 7],
     brown: f32,
+    // DC blocker state (input, output).
+    hp: (f32, f32),
 }
 
 impl NoiseState {
@@ -184,11 +232,35 @@ impl NoiseState {
         self.brown = (self.brown + 0.02 * w) / 1.02;
         [w * 0.35, pink, self.brown * 3.5]
     }
+
+    /// One-pole high-pass around 20 Hz. Pink and brown noise carry a lot of
+    /// inaudible sub-20 Hz energy that makes the signal level wander by ~2 dB;
+    /// OS loudness equalisers and headphone limiters react to that wander and
+    /// audibly pump the volume up and down.
+    #[inline]
+    fn high_pass(&mut self, x: f32, r: f32) -> f32 {
+        let y = x - self.hp.0 + r * self.hp.1;
+        self.hp = (x, y);
+        y
+    }
+}
+
+/// Transparent below the knee, smoothly saturating above it.
+#[inline]
+fn soft_limit(x: f32) -> f32 {
+    const KNEE: f32 = 0.8;
+    let a = x.abs();
+    if a <= KNEE {
+        x
+    } else {
+        let over = (a - KNEE) / (1.0 - KNEE);
+        (KNEE + (1.0 - KNEE) * over / (1.0 + over)).copysign(x)
+    }
 }
 
 struct Synth {
     sr: f32,
-    rng: u32,
+    rng: u64,
     ch: [NoiseState; 2],
     phase: [f32; 2],
     // Targets read once per buffer, smoothed per sample to avoid clicks.
@@ -197,13 +269,16 @@ struct Synth {
     beat: f32,
     carrier: f32,
     smooth: f32,
+    hp_r: f32,
+    chime_seen: u32,
+    chime_t: u32,
 }
 
 impl Synth {
     fn new(sr: f32) -> Self {
         Synth {
             sr,
-            rng: 0x9E37_79B9,
+            rng: 0x9E37_79B9_7F4A_7C15,
             ch: [NoiseState::default(); 2],
             phase: [0.0; 2],
             target: [0.0; 6],
@@ -211,6 +286,9 @@ impl Synth {
             beat: 10.0,
             carrier: 200.0,
             smooth: 1.0 - (-1.0 / (0.04 * sr)).exp(),
+            hp_r: 1.0 - std::f32::consts::TAU * 20.0 / sr,
+            chime_seen: 0,
+            chime_t: u32::MAX,
         }
     }
 
@@ -226,17 +304,38 @@ impl Synth {
         ];
         self.beat = s.beat.get();
         self.carrier = s.carrier.get();
+        let chime = s.chime.load(Relaxed);
+        if chime != self.chime_seen {
+            self.chime_seen = chime;
+            self.chime_t = 0;
+        }
     }
 
+    /// Uniform in [-1, 1) from xorshift64*.
     #[inline]
     fn rand(&mut self) -> f32 {
-        // xorshift32
         let mut x = self.rng;
-        x ^= x << 13;
-        x ^= x >> 17;
-        x ^= x << 5;
+        x ^= x >> 12;
+        x ^= x << 25;
+        x ^= x >> 27;
         self.rng = x;
-        (x as f32 / u32::MAX as f32) * 2.0 - 1.0
+        let bits = (x.wrapping_mul(0x2545_F491_4F6C_DD1D) >> 40) as u32; // 24 bits
+        bits as f32 * (2.0 / (1u32 << 24) as f32) - 1.0
+    }
+
+    /// Soft two-partial bell, independent of the noise fade.
+    #[inline]
+    fn chime(&mut self) -> f32 {
+        let len = (CHIME_LEN * self.sr) as u32;
+        if self.chime_t >= len {
+            return 0.0;
+        }
+        let t = self.chime_t as f32 / self.sr;
+        self.chime_t += 1;
+        let attack = (t / 0.005).min(1.0);
+        let env = attack * (-t / 0.45).exp();
+        let w = std::f32::consts::TAU * t;
+        env * 0.22 * ((w * 784.0).sin() + 0.5 * (w * 1176.0).sin())
     }
 
     #[inline]
@@ -245,16 +344,18 @@ impl Synth {
             *g += (t - *g) * self.smooth;
         }
         let g = self.gain;
+        let bell = self.chime() * g[4].max(0.15);
         let mut out = [0.0f32; 2];
         let freqs = [self.carrier - self.beat * 0.5, self.carrier + self.beat * 0.5];
         for c in 0..2 {
             let w = self.rand();
             let [wh, pk, br] = self.ch[c].next(w);
+            let noise = self.ch[c].high_pass(wh * g[0] + pk * g[1] + br * g[2], self.hp_r);
             let p = &mut self.phase[c];
             *p = (*p + freqs[c] / self.sr).fract();
             let tone = (*p * std::f32::consts::TAU).sin() * 0.3;
-            let mix = wh * g[0] + pk * g[1] + br * g[2] + tone * g[3];
-            out[c] = (mix * g[4] * g[5]).clamp(-1.0, 1.0);
+            let mix = (noise + tone * g[3]) * g[4] * g[5] + bell;
+            out[c] = soft_limit(mix);
         }
         (out[0], out[1])
     }
@@ -278,5 +379,56 @@ mod tests {
             let r = rms(i);
             assert!((0.08..0.35).contains(&r), "noise {i} rms {r}");
         }
+    }
+
+    #[test]
+    fn rand_is_centred() {
+        let mut s = Synth::new(48_000.0);
+        let mean: f32 = (0..100_000).map(|_| s.rand()).sum::<f32>() / 100_000.0;
+        assert!(mean.abs() < 0.01);
+    }
+
+    /// Regression test for the "volume drifts by a few dB" bug: the short-term
+    /// level of the output must stay steady at fixed settings.
+    #[test]
+    fn short_term_level_is_steady() {
+        for gains in [[0.0, 0.36, 0.0], [0.0, 0.0, 0.36], [0.25, 0.36, 0.36]] {
+            let sr = 48_000.0;
+            let mut s = Synth::new(sr);
+            s.target = [gains[0], gains[1], gains[2], 0.0, 0.49, 1.0];
+            s.gain = s.target;
+            let win = (0.4 * sr) as usize;
+            for _ in 0..win {
+                s.next(); // let the filters settle
+            }
+            let db: Vec<f64> = (0..150)
+                .map(|_| {
+                    let acc: f64 = (0..win).map(|_| (s.next().0 as f64).powi(2)).sum();
+                    10.0 * (acc / win as f64).log10()
+                })
+                .collect();
+            let mean = db.iter().sum::<f64>() / db.len() as f64;
+            let worst = db.iter().map(|d| (d - mean).abs()).fold(0.0, f64::max);
+            assert!(worst < 1.5, "{gains:?}: level wanders by {worst:.2} dB");
+        }
+    }
+
+    #[test]
+    fn soft_limit_is_bounded_and_transparent() {
+        assert_eq!(soft_limit(0.5), 0.5);
+        assert!(soft_limit(5.0) < 1.0 && soft_limit(-5.0) > -1.0);
+    }
+
+    #[test]
+    fn chime_rings_once() {
+        let mut s = Synth::new(48_000.0);
+        let sh = Shared::default();
+        sh.chime.fetch_add(1, Relaxed);
+        s.load(&sh);
+        let energy: f32 = (0..48_000).map(|_| s.next().0.abs()).sum();
+        assert!(energy > 100.0);
+        s.load(&sh);
+        let tail: f32 = (0..200_000).map(|_| s.next().0.abs()).sum::<f32>();
+        assert!(tail < energy);
     }
 }
