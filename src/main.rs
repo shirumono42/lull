@@ -47,6 +47,8 @@ struct Canvas {
     /// event can be lost when a window is created or resized from inside
     /// another event handler, leaving the window white, black or stale.
     needs_draw: bool,
+    /// macOS: the shadow has been recomputed for the current shape.
+    shadow_ok: bool,
 }
 
 impl Canvas {
@@ -63,7 +65,7 @@ impl Canvas {
         match surface {
             Ok(surface) => {
                 let painter = Painter::new(window.scale_factor() as f32);
-                Some(Canvas { window, surface, painter, needs_draw: true })
+                Some(Canvas { window, surface, painter, needs_draw: true, shadow_ok: false })
             }
             Err(e) => {
                 eprintln!("lull: surface error: {e}");
@@ -93,6 +95,10 @@ impl Canvas {
         if let Ok(mut buf) = self.surface.buffer_mut() {
             self.painter.blit(&mut buf);
             let _ = buf.present();
+        }
+        if !self.shadow_ok {
+            platform::refresh_shadow(&self.window);
+            self.shadow_ok = true;
         }
     }
 }
@@ -468,7 +474,9 @@ impl App {
             }
             if o.zoom != zoom {
                 let _ = w.request_inner_size(size);
+                platform::round_corners(w, platform::corner_radius(true) * zoom as f64);
                 o.zoom = zoom;
+                o.canvas.shadow_ok = false;
                 o.canvas.invalidate();
             }
             return;
@@ -506,6 +514,8 @@ impl App {
         if let Some(canvas) = Canvas::new(el, attrs) {
             platform::set_opacity(&canvas.window, self.settings.overlay_opacity);
             platform::show_on_all_spaces(&canvas.window);
+            // Floating timer = HUD-style panel; its radius scales with its size.
+            platform::round_corners(&canvas.window, platform::corner_radius(true) * zoom as f64);
             self.overlay = Some(Overlay { canvas, last_press: None, on_top, opacity, zoom });
         }
     }
@@ -619,6 +629,8 @@ impl App {
         }
 
         let Some(canvas) = Canvas::new(el, attrs) else { return };
+        // Settings panel = standard window without a toolbar.
+        platform::round_corners(&canvas.window, platform::corner_radius(false));
         canvas.window.set_visible(true);
         canvas.window.focus_window();
         self.panel = Some(Panel { canvas, ui: Ui::new(self.tab), cursor: (-1.0, -1.0), had_focus: false });
@@ -704,12 +716,21 @@ fn bars_icon(playing: bool) -> tray_icon::Icon {
 }
 
 impl ApplicationHandler<UserEvent> for App {
-    fn resumed(&mut self, _el: &ActiveEventLoop) {
+    fn resumed(&mut self, el: &ActiveEventLoop) {
         // Tray icons must be created once the event loop is running (macOS).
         if self.tray.is_none() {
             self.create_tray();
             if cfg!(windows) && self.tray.is_some() && !self.settings.tray_pinned {
                 self.pin_retry = Some((Instant::now() + Duration::from_millis(500), 0));
+            }
+            // For screenshots in CI: show the panel and a running on-screen
+            // timer without any input. Nothing here is saved.
+            if std::env::var_os("LULL_SCREENSHOT").is_some() {
+                self.settings.overlay = true;
+                self.timer.start(Instant::now());
+                self.sync_overlay(el);
+                self.tab = Tab::Timer;
+                self.show_panel(el, None);
             }
         }
     }

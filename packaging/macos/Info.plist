@@ -6,6 +6,7 @@
   <key>CFBundleDisplayName</key><string>Lull</string>
   <key>CFBundleIdentifier</key><string>io.github.shirumono42.lull</string>
   <key>CFBundleExecutable</key><string>lull</string>
+  <key>CFBundleIconFile</key><string>lull</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleVersion</key><string>__VERSION__</string>
   <key>CFBundleShortVersionString</key><string>__VERSION__</string>

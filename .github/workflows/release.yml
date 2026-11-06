@@ -37,7 +37,8 @@ jobs:
       - name: Bundle universal Lull.app
         run: |
           APP=Lull.app/Contents
-          mkdir -p $APP/MacOS
+          mkdir -p $APP/MacOS $APP/Resources
+          cp assets/lull.icns $APP/Resources/lull.icns
           lipo -create -output $APP/MacOS/lull \
             target/aarch64-apple-darwin/release/lull \
             target/x86_64-apple-darwin/release/lull

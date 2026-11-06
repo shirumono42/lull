@@ -112,3 +112,90 @@ pub fn promote_tray_icon() -> bool {
     }
     found
 }
+
+/// macOS major version, read from the system version file (no process spawn).
+#[cfg(target_os = "macos")]
+fn macos_major() -> u32 {
+    let plist = std::fs::read_to_string("/System/Library/CoreServices/SystemVersion.plist").unwrap_or_default();
+    plist
+        .split("<key>ProductVersion</key>")
+        .nth(1)
+        .and_then(|rest| rest.split("<string>").nth(1))
+        .and_then(|v| v.split(['.', '<']).next())
+        .and_then(|major| major.trim().parse().ok())
+        .unwrap_or(15)
+}
+
+/// Corner radius (pt) macOS gives its own windows of each kind, measured with
+/// `-[NSWindow _cornerRadius]`: standard titled windows are 12 pt on macOS 15
+/// and 16 pt on macOS 26; HUD panels 10 pt and 15 pt.
+#[cfg(not(target_os = "macos"))]
+pub fn corner_radius(_hud: bool) -> f64 {
+    0.0 // Windows 11 rounds borderless windows itself (see CornerPreference)
+}
+
+#[cfg(target_os = "macos")]
+pub fn corner_radius(hud: bool) -> f64 {
+    match (macos_major() >= 26, hud) {
+        (true, false) => 16.0,
+        (true, true) => 15.0,
+        (false, false) => 12.0,
+        (false, true) => 10.0,
+    }
+}
+
+/// macOS: borderless windows get square corners. Clip the content to a
+/// rounded rectangle with Apple's continuous ("squircle") corner curve and
+/// let the system draw its shadow around that shape.
+pub fn round_corners(w: &Window, radius: f64) {
+    #[cfg(target_os = "macos")]
+    if let Ok(handle) = w.window_handle() {
+        if let RawWindowHandle::AppKit(h) = handle.as_raw() {
+            unsafe {
+                use objc2::runtime::{AnyObject, Bool};
+                use objc2::{class, msg_send};
+                let view = &*(h.ns_view.as_ptr() as *const AnyObject);
+                let _: () = msg_send![view, setWantsLayer: Bool::YES];
+                let layer: *const AnyObject = msg_send![view, layer];
+                if let Some(layer) = layer.as_ref() {
+                    let _: () = msg_send![layer, setCornerRadius: radius];
+                    let _: () = msg_send![layer, setMasksToBounds: Bool::YES];
+                    // kCACornerCurveContinuous (macOS 10.15+).
+                    let curve: *const AnyObject =
+                        msg_send![class!(NSString), stringWithUTF8String: c"continuous".as_ptr()];
+                    let _: () = msg_send![layer, setCornerCurve: curve];
+                }
+                let win: *const AnyObject = msg_send![view, window];
+                if let Some(win) = win.as_ref() {
+                    let clear: *const AnyObject = msg_send![class!(NSColor), clearColor];
+                    let _: () = msg_send![win, setOpaque: Bool::NO];
+                    let _: () = msg_send![win, setBackgroundColor: clear];
+                    let _: () = msg_send![win, setHasShadow: Bool::YES];
+                }
+            }
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = (w, radius);
+}
+
+/// macOS computes a window's shadow from its content; recompute it after the
+/// first frame so it follows the rounded corners.
+pub fn refresh_shadow(w: &Window) {
+    #[cfg(target_os = "macos")]
+    if let Ok(handle) = w.window_handle() {
+        if let RawWindowHandle::AppKit(h) = handle.as_raw() {
+            unsafe {
+                use objc2::msg_send;
+                use objc2::runtime::AnyObject;
+                let view = &*(h.ns_view.as_ptr() as *const AnyObject);
+                let win: *const AnyObject = msg_send![view, window];
+                if let Some(win) = win.as_ref() {
+                    let _: () = msg_send![win, invalidateShadow];
+                }
+            }
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = w;
+}
