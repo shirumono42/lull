@@ -591,7 +591,8 @@ impl Ui {
                 Tog::Overlay => (s.overlay, true),
                 _ => (s.overlay_on_top, s.overlay),
             };
-            self.toggle(p, tog, x, cy, on, if enabled { TIMER_COLOR } else { DIM }, small);
+            // Disabled but on: muted, so the on/off state stays readable.
+            self.toggle(p, tog, x, cy, on, if enabled { TIMER_COLOR } else { (122, 84, 72) }, small);
             let a = if enabled { 255 } else { 120 };
             p.text(x + 32.0, cy + 4.0, 11.0, TEXT, a, label, Align::Left);
         }

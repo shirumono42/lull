@@ -97,6 +97,11 @@ struct Panel {
 struct Overlay {
     canvas: Canvas,
     last_press: Option<Instant>,
+    // What is currently applied to the window, so unchanged settings are not
+    // pushed to it again.
+    on_top: bool,
+    opacity: f32,
+    zoom: f32,
 }
 
 #[derive(Clone, PartialEq)]
@@ -136,6 +141,8 @@ struct App {
     /// Footer text listing the shortcuts (and any that failed to register).
     hint: String,
     last_hide: Option<Instant>,
+    /// What the panel and overlay last showed; they are redrawn only when it changes.
+    view_key: String,
     /// Windows: next attempt to pin the tray icon, while still trying.
     pin_retry: Option<(Instant, u32)>,
 }
@@ -177,6 +184,7 @@ impl App {
             hk_panel: ids[2],
             hint: hint.join("      "),
             last_hide: None,
+            view_key: String::new(),
             pin_retry: None,
         }
     }
@@ -312,6 +320,23 @@ impl App {
                 t.icon_key = Some(key);
             }
         }
+        // Redraw only when something visible changed. Requesting a redraw on
+        // every loop iteration made the panel repaint nonstop.
+        let view_key = format!(
+            "{playing}{}{}{:?}{}{}",
+            tv.active,
+            tv.running,
+            tv.phase,
+            tv.round,
+            tv.remaining.as_secs()
+        );
+        if view_key != self.view_key {
+            self.view_key = view_key;
+            self.redraw_all();
+        }
+    }
+
+    fn redraw_all(&self) {
         if let Some(p) = &self.panel {
             p.canvas.window.request_redraw();
         }
@@ -325,6 +350,7 @@ impl App {
         self.dirty = Some(Instant::now());
         self.sync_overlay(el);
         self.refresh();
+        self.redraw_all();
     }
 
     fn save_now(&mut self) {
@@ -395,14 +421,26 @@ impl App {
             self.overlay = None;
             return;
         }
-        let level = if self.settings.overlay_on_top { WindowLevel::AlwaysOnTop } else { WindowLevel::Normal };
+        let (on_top, opacity, zoom) =
+            (self.settings.overlay_on_top, self.settings.overlay_opacity, self.settings.overlay_size);
+        let level = if on_top { WindowLevel::AlwaysOnTop } else { WindowLevel::Normal };
         let size = self.overlay_size();
-        if let Some(o) = &self.overlay {
+        // Changing the level of a live window makes winit rewrite its extended
+        // style, which drops the layered (opacity) flag and, on Windows, left
+        // the panel unable to repaint. A fresh window at the new level avoids it.
+        if self.overlay.as_ref().is_some_and(|o| o.on_top != on_top) {
+            self.overlay = None;
+        }
+        if let Some(o) = &mut self.overlay {
             let w = &o.canvas.window;
-            w.set_window_level(level);
-            platform::set_opacity(w, self.settings.overlay_opacity);
-            if w.inner_size().to_logical::<f64>(w.scale_factor()) != size {
+            if o.opacity != opacity {
+                platform::set_opacity(w, opacity);
+                o.opacity = opacity;
+            }
+            if o.zoom != zoom {
                 let _ = w.request_inner_size(size);
+                w.request_redraw();
+                o.zoom = zoom;
             }
             return;
         }
@@ -440,7 +478,7 @@ impl App {
             platform::set_opacity(&canvas.window, self.settings.overlay_opacity);
             platform::show_on_all_spaces(&canvas.window);
             canvas.window.request_redraw();
-            self.overlay = Some(Overlay { canvas, last_press: None });
+            self.overlay = Some(Overlay { canvas, last_press: None, on_top, opacity, zoom });
         }
     }
 
