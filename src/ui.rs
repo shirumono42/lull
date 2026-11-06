@@ -1006,8 +1006,22 @@ mod tests {
         p.resize((OVERLAY_W * 2.0) as u32, (OVERLAY_H * 2.0) as u32, 2.0);
         draw_overlay(&mut p, &timer_view());
         p.pix.save_png(dir.join("overlay.png")).unwrap();
-        let rgba = tray_timer_rgba(32, "21", Phase::Focus, true);
-        let icon = Pixmap::from_vec(rgba, tiny_skia::IntSize::from_wh(32, 32).unwrap()).unwrap();
-        icon.save_png(dir.join("tray.png")).unwrap();
+        // Tray icon states on a taskbar-like strip: focus, break, paused.
+        let mut strip = Pixmap::new(3 * 64 + 4 * 16, 96).unwrap();
+        strip.fill(tiny_skia::Color::from_rgba8(32, 32, 36, 255));
+        let states = [("21", Phase::Focus, true), ("4", Phase::Break, true), ("21", Phase::Focus, false)];
+        for (i, (text, phase, running)) in states.into_iter().enumerate() {
+            let mut rgba = tray_timer_rgba(64, text, phase, running);
+            for px in rgba.chunks_exact_mut(4) {
+                let a = px[3] as u32;
+                for c in &mut px[..3] {
+                    *c = (*c as u32 * a / 255) as u8; // premultiply for tiny-skia
+                }
+            }
+            let icon = Pixmap::from_vec(rgba, tiny_skia::IntSize::from_wh(64, 64).unwrap()).unwrap();
+            let x = 16 + i as i32 * 80;
+            strip.draw_pixmap(x, 16, icon.as_ref(), &Default::default(), Transform::identity(), None);
+        }
+        strip.save_png(dir.join("tray.png")).unwrap();
     }
 }
