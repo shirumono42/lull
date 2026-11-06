@@ -92,11 +92,13 @@ impl Engine {
 
     /// Rings a short bell, opening the stream just for it if needed.
     pub fn chime(&mut self) {
-        self.shared.chime.fetch_add(1, Relaxed);
+        // Open the stream first: a new stream only rings chimes requested
+        // after it was built.
         if !self.is_playing() && self.ensure_stream() {
             let end = Instant::now() + Duration::from_secs_f32(CHIME_LEN);
             self.stop_at = Some(self.stop_at.map_or(end, |t| t.max(end)));
         }
+        self.shared.chime.fetch_add(1, Relaxed);
     }
 
     fn ensure_stream(&mut self) -> bool {
@@ -181,6 +183,8 @@ where
 {
     let channels = config.channels as usize;
     let mut synth = Synth::new(config.sample_rate as f32);
+    // Chimes rung before this stream existed are not replayed.
+    synth.chime_seen = shared.chime.load(Relaxed);
     device
         .build_output_stream(
             config,
@@ -357,6 +361,13 @@ impl Synth {
             let mix = (noise + tone * g[3]) * g[4] * g[5] + bell;
             out[c] = soft_limit(mix);
         }
+        if !(out[0].is_finite() && out[1].is_finite()) {
+            // Never let a bad value latch into the filters and play on.
+            self.ch = [NoiseState::default(); 2];
+            self.phase = [0.0; 2];
+            self.chime_t = u32::MAX;
+            return (0.0, 0.0);
+        }
         (out[0], out[1])
     }
 }
@@ -417,6 +428,48 @@ mod tests {
     fn soft_limit_is_bounded_and_transparent() {
         assert_eq!(soft_limit(0.5), 0.5);
         assert!(soft_limit(5.0) < 1.0 && soft_limit(-5.0) > -1.0);
+    }
+
+    /// After the sound is stopped and a chime has rung out, the output must be
+    /// true silence: nothing may keep sounding after the timer ends.
+    #[test]
+    fn silent_after_stop_and_chime() {
+        let sr = 48_000.0;
+        let mut s = Synth::new(sr);
+        let sh = Shared::default();
+        sh.running.store(true, Relaxed);
+        sh.master.set(0.5);
+        for g in &sh.noise {
+            g.set(0.4);
+        }
+        sh.binaural.set(0.4);
+        sh.beat.set(6.0);
+        sh.carrier.set(200.0);
+        for block in 0..(sr as usize * 6 / 512) {
+            if block == (sr as usize * 2 / 512) {
+                sh.running.store(false, Relaxed); // focus ended
+                sh.chime.fetch_add(1, Relaxed); // chime at the same moment
+            }
+            s.load(&sh);
+            for _ in 0..512 {
+                let (l, r) = s.next();
+                assert!(l.is_finite() && r.is_finite());
+                if block > sr as usize * 5 / 512 {
+                    assert!(l.abs() < 1e-4 && r.abs() < 1e-4, "still sounding: {l}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn new_stream_does_not_replay_old_chimes() {
+        let sh = Shared::default();
+        sh.chime.fetch_add(3, Relaxed);
+        let mut s = Synth::new(48_000.0);
+        s.chime_seen = sh.chime.load(Relaxed);
+        s.load(&sh);
+        let energy: f32 = (0..4_800).map(|_| s.next().0.abs()).sum();
+        assert_eq!(energy, 0.0);
     }
 
     #[test]

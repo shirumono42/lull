@@ -98,6 +98,13 @@ impl Default for Settings {
     }
 }
 
+const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// The folder holding Lull's files.
+pub fn dir() -> Option<PathBuf> {
+    path().and_then(|p| p.parent().map(PathBuf::from))
+}
+
 fn path() -> Option<PathBuf> {
     #[cfg(windows)]
     let base = std::env::var_os("APPDATA").map(PathBuf::from);
@@ -113,11 +120,19 @@ fn path() -> Option<PathBuf> {
 impl Settings {
     pub fn load() -> Self {
         let text = path().and_then(|p| std::fs::read_to_string(p).ok()).unwrap_or_default();
-        Self::parse(&text)
+        let s = Self::parse(&text);
+        if !text.is_empty() && !text.lines().any(|l| l.trim() == format!("version={VERSION}")) {
+            s.save(); // record the reset so it happens once per update
+        }
+        s
     }
 
+    /// Settings written by another version keep only the sound (what was
+    /// last playing); the timer, on-screen timer, shortcuts and tray state
+    /// start fresh.
     fn parse(text: &str) -> Self {
         let mut s = Settings::default();
+        let mut version = None;
         for line in text.lines() {
             let Some((k, v)) = line.split_once('=') else { continue };
             let v = v.trim();
@@ -150,6 +165,7 @@ impl Settings {
                 ("overlay_opacity", Some(f)) => s.overlay_opacity = f,
                 ("overlay_size", Some(f)) => s.overlay_size = f,
                 ("tray_pinned", _) => s.tray_pinned = b,
+                ("version", _) => version = Some(v),
                 ("overlay_pos", _) => {
                     s.overlay_pos = v
                         .split_once(',')
@@ -157,6 +173,18 @@ impl Settings {
                 }
                 _ => {}
             }
+        }
+        if version != Some(VERSION) {
+            s = Settings {
+                master: s.master,
+                noise_on: s.noise_on,
+                noise_vol: s.noise_vol,
+                bin_on: s.bin_on,
+                bin_vol: s.bin_vol,
+                beat: s.beat,
+                carrier: s.carrier,
+                ..Settings::default()
+            };
         }
         s.clamp()
     }
@@ -191,6 +219,7 @@ impl Settings {
         let b = |x: bool| x as u8;
         let pos = self.overlay_pos.map(|(x, y)| format!("{x},{y}")).unwrap_or_default();
         let lines = [
+            format!("version={VERSION}"),
             format!("master={}", self.master),
             format!("white={}", self.noise_vol[0]),
             format!("pink={}", self.noise_vol[1]),
@@ -266,10 +295,24 @@ mod tests {
 
     #[test]
     fn bad_values_are_clamped() {
-        let s = Settings::parse("focus_min=999\nrounds=0\noverlay_opacity=nan\noverlay_pos=abc");
+        let text = format!("version={VERSION}\nfocus_min=999\nrounds=0\noverlay_opacity=nan\noverlay_pos=abc");
+        let s = Settings::parse(&text);
         assert_eq!(s.focus_min, 120.0);
         assert_eq!(s.rounds, 1.0);
         assert_eq!(s.overlay_opacity, Settings::default().overlay_opacity);
         assert_eq!(s.overlay_pos, None);
+    }
+
+    #[test]
+    fn other_version_keeps_only_sound() {
+        let text = "version=0.2.2\nmaster=0.3\npink_on=0\nbrown=0.9\nbinaural_on=1\nbeat=6\n\
+                    focus_min=50\noverlay=1\noverlay_pos=10,10\nhotkey_play=ctrl+KeyQ\ntray_pinned=1";
+        let s = Settings::parse(text);
+        let d = Settings::default();
+        assert_eq!((s.master, s.noise_on[1], s.noise_vol[2], s.bin_on, s.beat), (0.3, false, 0.9, true, 6.0));
+        assert_eq!((s.focus_min, s.overlay, s.overlay_pos), (d.focus_min, d.overlay, None));
+        assert_eq!((s.hotkey_play.as_str(), s.tray_pinned), (d.hotkey_play.as_str(), false));
+        // Files from before versioning are treated the same way.
+        assert_eq!(Settings::parse("focus_min=50\nmaster=0.3").focus_min, d.focus_min);
     }
 }

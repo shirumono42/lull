@@ -1,6 +1,7 @@
 #![cfg_attr(not(test), windows_subsystem = "windows")]
 
 mod audio;
+mod instance;
 mod platform;
 mod pomodoro;
 mod settings;
@@ -41,6 +42,11 @@ struct Canvas {
     window: Rc<Window>,
     surface: softbuffer::Surface<Rc<Window>, Rc<Window>>,
     painter: Painter,
+    /// Content changed since the last frame. Drawn at the end of each event
+    /// loop pass instead of relying only on `RedrawRequested`: on Windows that
+    /// event can be lost when a window is created or resized from inside
+    /// another event handler, leaving the window white, black or stale.
+    needs_draw: bool,
 }
 
 impl Canvas {
@@ -57,7 +63,7 @@ impl Canvas {
         match surface {
             Ok(surface) => {
                 let painter = Painter::new(window.scale_factor() as f32);
-                Some(Canvas { window, surface, painter })
+                Some(Canvas { window, surface, painter, needs_draw: true })
             }
             Err(e) => {
                 eprintln!("lull: surface error: {e}");
@@ -66,8 +72,14 @@ impl Canvas {
         }
     }
 
+    fn invalidate(&mut self) {
+        self.needs_draw = true;
+        self.window.request_redraw();
+    }
+
     /// Draws at `zoom` × the window's DPI scale and presents the frame.
     fn present(&mut self, zoom: f32, draw: impl FnOnce(&mut Painter)) {
+        self.needs_draw = false;
         let size = self.window.inner_size();
         let (Some(w), Some(h)) = (NonZeroU32::new(size.width), NonZeroU32::new(size.height)) else {
             return;
@@ -336,12 +348,29 @@ impl App {
         }
     }
 
-    fn redraw_all(&self) {
-        if let Some(p) = &self.panel {
-            p.canvas.window.request_redraw();
+    fn redraw_all(&mut self) {
+        if let Some(p) = &mut self.panel {
+            p.canvas.invalidate();
         }
-        if let Some(o) = &self.overlay {
-            o.canvas.window.request_redraw();
+        if let Some(o) = &mut self.overlay {
+            o.canvas.invalidate();
+        }
+    }
+
+    fn paint_panel(&mut self) {
+        let playing = self.engine.is_playing();
+        let tv = self.timer_view();
+        if let Some(p) = &mut self.panel {
+            let (ui, s, hint) = (&p.ui, &self.settings, &self.hint);
+            p.canvas.present(1.0, |pt| ui.draw(pt, s, playing, &tv, hint));
+        }
+    }
+
+    fn paint_overlay(&mut self) {
+        let tv = self.timer_view();
+        let zoom = self.settings.overlay_size;
+        if let Some(o) = &mut self.overlay {
+            o.canvas.present(zoom, |p| ui::draw_overlay(p, &tv));
         }
     }
 
@@ -439,8 +468,8 @@ impl App {
             }
             if o.zoom != zoom {
                 let _ = w.request_inner_size(size);
-                w.request_redraw();
                 o.zoom = zoom;
+                o.canvas.invalidate();
             }
             return;
         }
@@ -477,7 +506,6 @@ impl App {
         if let Some(canvas) = Canvas::new(el, attrs) {
             platform::set_opacity(&canvas.window, self.settings.overlay_opacity);
             platform::show_on_all_spaces(&canvas.window);
-            canvas.window.request_redraw();
             self.overlay = Some(Overlay { canvas, last_press: None, on_top, opacity, zoom });
         }
     }
@@ -485,14 +513,8 @@ impl App {
     fn overlay_event(&mut self, el: &ActiveEventLoop, ev: WindowEvent) {
         let Some(o) = &mut self.overlay else { return };
         match ev {
-            WindowEvent::RedrawRequested => {
-                let tv = self.timer_view();
-                let zoom = self.settings.overlay_size;
-                if let Some(o) = &mut self.overlay {
-                    o.canvas.present(zoom, |p| ui::draw_overlay(p, &tv));
-                }
-            }
-            WindowEvent::Resized(_) | WindowEvent::ScaleFactorChanged { .. } => o.canvas.window.request_redraw(),
+            WindowEvent::RedrawRequested => self.paint_overlay(),
+            WindowEvent::Resized(_) | WindowEvent::ScaleFactorChanged { .. } => o.canvas.invalidate(),
             WindowEvent::MouseInput { state: ElementState::Pressed, button: winit::event::MouseButton::Left, .. } => {
                 // Double-click pauses / resumes; a press-and-drag moves it.
                 let now = Instant::now();
@@ -599,7 +621,6 @@ impl App {
         let Some(canvas) = Canvas::new(el, attrs) else { return };
         canvas.window.set_visible(true);
         canvas.window.focus_window();
-        canvas.window.request_redraw();
         self.panel = Some(Panel { canvas, ui: Ui::new(self.tab), cursor: (-1.0, -1.0), had_focus: false });
     }
 
@@ -607,8 +628,8 @@ impl App {
         match r {
             Response::None => {}
             Response::Redraw => {
-                if let Some(p) = &self.panel {
-                    p.canvas.window.request_redraw();
+                if let Some(p) = &mut self.panel {
+                    p.canvas.invalidate();
                 }
             }
             Response::Changed => self.settings_changed(el),
@@ -621,18 +642,11 @@ impl App {
         let Some(p) = &mut self.panel else { return };
         let scale = p.canvas.window.scale_factor() as f32;
         match ev {
-            WindowEvent::RedrawRequested => {
-                let playing = self.engine.is_playing();
-                let tv = self.timer_view();
-                if let Some(p) = &mut self.panel {
-                    let (ui, s, hint) = (&p.ui, &self.settings, &self.hint);
-                    p.canvas.present(1.0, |pt| ui.draw(pt, s, playing, &tv, hint));
-                }
-            }
+            WindowEvent::RedrawRequested => self.paint_panel(),
             WindowEvent::Focused(true) => p.had_focus = true,
             WindowEvent::Focused(false) if p.had_focus => self.hide_panel(),
             WindowEvent::CloseRequested => self.hide_panel(),
-            WindowEvent::ScaleFactorChanged { .. } | WindowEvent::Resized(_) => p.canvas.window.request_redraw(),
+            WindowEvent::ScaleFactorChanged { .. } | WindowEvent::Resized(_) => p.canvas.invalidate(),
             WindowEvent::CursorMoved { position, .. } => {
                 p.cursor = (position.x as f32 / scale, position.y as f32 / scale);
                 let r = p.ui.moved(&mut self.settings, p.cursor.0, p.cursor.1);
@@ -667,7 +681,7 @@ impl App {
                 Key::Named(NamedKey::Space) => self.toggle_play(),
                 Key::Named(NamedKey::Tab) => {
                     p.ui.tab = if p.ui.tab == Tab::Sound { Tab::Timer } else { Tab::Sound };
-                    p.canvas.window.request_redraw();
+                    p.canvas.invalidate();
                 }
                 Key::Character(c) if c.eq_ignore_ascii_case("q") => self.quit(el),
                 _ => {}
@@ -773,6 +787,12 @@ impl ApplicationHandler<UserEvent> for App {
         self.try_pin_tray(now);
         let engine_at = self.engine.poll();
         self.refresh();
+        if self.panel.as_ref().is_some_and(|p| p.canvas.needs_draw) {
+            self.paint_panel();
+        }
+        if self.overlay.as_ref().is_some_and(|o| o.canvas.needs_draw) {
+            self.paint_overlay();
+        }
         let pin_at = self.pin_retry.map(|(t, _)| t);
         let wake = [engine_at, self.timer.next_tick(&plan, now), save_at, pin_at].into_iter().flatten().min();
         el.set_control_flow(match wake {
@@ -799,6 +819,9 @@ fn forward<T: 'static>(
 }
 
 fn main() {
+    if let instance::Claim::AlreadyRunning = instance::claim() {
+        return;
+    }
     let mut builder = EventLoop::<UserEvent>::with_user_event();
     #[cfg(target_os = "macos")]
     {
