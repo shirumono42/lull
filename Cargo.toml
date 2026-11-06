@@ -1,6 +1,6 @@
 [package]
 name = "lull"
-version = "0.3.0"
+version = "0.3.1"
 description = "Tiny tray app for white/pink/brown noise and binaural beats"
 license = "MIT"
 repository = "https://github.com/shirumono42/lull"
