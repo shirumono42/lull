@@ -13,10 +13,22 @@
 
 | OS | ファイル | 使い方 |
 | --- | --- | --- |
-| Windows 10/11 (x64) | `Lull-windows-x64.zip` | 展開して `Lull.exe` を実行 |
+| Windows 10/11 (x64) | `Lull-windows-x64-setup.exe`（おすすめ） | 実行してインストール |
+| Windows 10/11 (x64) | `Lull-windows-x64.zip`（ポータブル版） | 展開して `Lull.exe` を実行 |
 | macOS 11+ (Apple Silicon / Intel) | `Lull-macos-universal.zip` | 展開して `Lull.app` を「アプリケーション」へ移動して起動 |
 
-インストーラーはありません。起動するとタスクトレイ（macOS はメニューバー）にアイコンが出ます。
+**Windows のインストーラー**は管理者権限なしで、自分のアカウントだけにインストールします（`%LOCALAPPDATA%\Programs\Lull`）。
+
+- スタートメニューに「Lull」が入るので、Windows の検索や Raycast などのランチャーから起動できます。
+- インストール中に「Windows へのサインイン時に Lull を起動する」を選べます。
+- 更新するときは新しいインストーラーをそのまま実行してください。動いている Lull は自動で閉じられます。
+- アンインストールは、設定 → アプリ → インストールされているアプリ → Lull から行えます。
+
+ポータブル版（zip）はスタートメニューに入らないため、ランチャーには出てきません。
+ポータブル版をランチャーから使いたい場合は、`Lull.exe` を置いたフォルダーをランチャーの検索対象に追加してください
+（Raycast では Settings → Applications → Directories）。
+
+起動するとタスクトレイ（macOS はメニューバー）にアイコンが出ます。
 Windows ではトレイに Lull のアイコンが出て、音を止めているあいだは灰色になります。
 macOS のメニューバーには、ほかのアプリと同じく白黒の波形アイコンが出ます。
 
@@ -40,7 +52,7 @@ macOS 版は GitHub Actions でビルドとテストを通していますが、�
 > xattr -dr com.apple.quarantine /Applications/Lull.app
 > ```
 >
-> **Windows で SmartScreen が出たら**: 「詳細情報」→「実行」を押してください。
+> **Windows で SmartScreen が出たら**: 署名していないためです。「詳細情報」→「実行」を押してください（インストーラーでも同じです）。
 
 ## 使い方
 
@@ -141,7 +153,8 @@ hotkey_panel=ctrl+alt+KeyL
 
 ### ログイン時に自動起動する
 
-- Windows: `Win + R` で `shell:startup` を開き、`Lull.exe` のショートカットを置く
+- Windows: インストーラーで「Windows へのサインイン時に Lull を起動する」を選ぶ。
+  ポータブル版では `Win + R` で `shell:startup` を開き、`Lull.exe` のショートカットを置く
 - macOS: システム設定 → 一般 → ログイン項目 に `Lull.app` を追加
 
 ## 省メモリの工夫
@@ -169,6 +182,8 @@ cargo build --release
 ```
 
 実行ファイルは `target/release/lull`（Windows は `lull.exe`）に出力されます。
+
+Windows のインストーラーは [Inno Setup](https://jrsoftware.org/isinfo.php) で作ります（`packaging/windows/build-installer.ps1`）。
 
 ## 技術メモ
 
