@@ -19,10 +19,18 @@ jobs:
           New-Item -ItemType Directory dist | Out-Null
           Copy-Item target/release/lull.exe dist/Lull.exe
           Compress-Archive -Path dist/Lull.exe -DestinationPath Lull-windows-x64.zip
+      - name: Installer
+        shell: pwsh
+        run: |
+          packaging/windows/build-installer.ps1 -Version "$env:GITHUB_REF_NAME".TrimStart('v')
+          packaging/windows/test-installer.ps1
+          Copy-Item dist/Lull-windows-x64-setup.exe .
       - uses: actions/upload-artifact@v7
         with:
           name: windows
-          path: Lull-windows-x64.zip
+          path: |
+            Lull-windows-x64.zip
+            Lull-windows-x64-setup.exe
 
   macos:
     runs-on: macos-latest
@@ -61,5 +69,5 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" Lull-windows-x64.zip Lull-macos-universal.zip \
+          gh release create "$GITHUB_REF_NAME" Lull-windows-x64-setup.exe Lull-windows-x64.zip Lull-macos-universal.zip \
             --repo "$GITHUB_REPOSITORY" --title "Lull $GITHUB_REF_NAME" --generate-notes

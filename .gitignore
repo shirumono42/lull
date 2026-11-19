@@ -2,3 +2,4 @@
 *.png
 !docs/*.png
 !assets/*.png
+/dist
