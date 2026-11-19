@@ -243,9 +243,9 @@ impl App {
             .with_menu_on_left_click(false)
             .with_tooltip("Lull");
         #[cfg(target_os = "macos")]
-        let builder = builder.with_icon_templated(bars_icon(false));
+        let builder = builder.with_icon_templated(idle_icon(false));
         #[cfg(not(target_os = "macos"))]
-        let builder = builder.with_icon(bars_icon(false));
+        let builder = builder.with_icon(idle_icon(false));
         match builder.build() {
             Ok(icon) => {
                 self.tray = Some(TrayParts {
@@ -325,7 +325,7 @@ impl App {
             let key = IconKey::Bars(playing);
             if t.icon_key.as_ref() != Some(&key) {
                 let icon = match &key {
-                    IconKey::Bars(p) => bars_icon(*p),
+                    IconKey::Bars(p) => idle_icon(*p),
                     IconKey::Timer(text, phase, running) => {
                         let rgba = ui::tray_timer_rgba(32, text, *phase, *running);
                         tray_icon::Icon::from_rgba(rgba, 32, 32).expect("valid icon")
@@ -497,6 +497,7 @@ impl App {
         });
 
         let mut attrs = Window::default_attributes()
+            .with_window_icon(window_icon())
             .with_title("Lull timer")
             .with_inner_size(size)
             .with_resizable(false)
@@ -509,7 +510,10 @@ impl App {
         #[cfg(windows)]
         {
             use winit::platform::windows::{CornerPreference, WindowAttributesExtWindows};
-            attrs = attrs.with_skip_taskbar(true).with_corner_preference(CornerPreference::Round);
+            attrs = attrs
+                .with_skip_taskbar(true)
+                .with_taskbar_icon(window_icon())
+                .with_corner_preference(CornerPreference::Round);
         }
         if let Some(canvas) = Canvas::new(el, attrs) {
             platform::set_opacity(&canvas.window, self.settings.overlay_opacity);
@@ -613,6 +617,7 @@ impl App {
         }
 
         let mut attrs = Window::default_attributes()
+            .with_window_icon(window_icon())
             .with_title("Lull")
             .with_inner_size(LogicalSize::new(ui::W as f64, ui::H as f64))
             .with_resizable(false)
@@ -625,7 +630,10 @@ impl App {
         #[cfg(windows)]
         {
             use winit::platform::windows::{CornerPreference, WindowAttributesExtWindows};
-            attrs = attrs.with_skip_taskbar(true).with_corner_preference(CornerPreference::Round);
+            attrs = attrs
+                .with_skip_taskbar(true)
+                .with_taskbar_icon(window_icon())
+                .with_corner_preference(CornerPreference::Round);
         }
 
         let Some(canvas) = Canvas::new(el, attrs) else { return };
@@ -709,10 +717,20 @@ impl App {
     }
 }
 
-fn bars_icon(playing: bool) -> tray_icon::Icon {
-    let size = 32;
-    let rgba = ui::tray_icon_rgba(size, playing, cfg!(target_os = "macos"));
-    tray_icon::Icon::from_rgba(rgba, size, size).expect("valid icon")
+/// Tray icon while no timer runs. macOS: monochrome bars (menu bar template
+/// image, as macOS expects). Windows: the app icon, faded while stopped.
+fn idle_icon(playing: bool) -> tray_icon::Icon {
+    #[cfg(target_os = "macos")]
+    let (rgba, w, h) = (ui::tray_icon_rgba(32, playing, true), 32, 32);
+    #[cfg(not(target_os = "macos"))]
+    let (rgba, w, h) = ui::app_icon_rgba(include_bytes!("../assets/icon-32.png"), !playing);
+    tray_icon::Icon::from_rgba(rgba, w, h).expect("valid icon")
+}
+
+/// Icon for the panel and timer windows (Alt+Tab, task switcher on Windows).
+fn window_icon() -> Option<winit::window::Icon> {
+    let (rgba, w, h) = ui::app_icon_rgba(include_bytes!("../assets/icon-64.png"), false);
+    winit::window::Icon::from_rgba(rgba, w, h).ok()
 }
 
 impl ApplicationHandler<UserEvent> for App {

@@ -1,4 +1,5 @@
-"""Generates Lull's app icons: assets/icon-1024.png, lull.icns (macOS), lull.ico (Windows).
+"""Generates Lull's app icons: assets/icon-1024.png, lull.icns (macOS), lull.ico (Windows),
+and the small icon-32.png / icon-64.png the app embeds for its tray and window icons.
 
 macOS: Apple's icon grid -- 1024 canvas, 824 x 824 body (100 px margin) with
 continuous ("squircle") corners and a soft drop shadow.
@@ -102,7 +103,10 @@ def main() -> None:
     mac.save(HERE / "lull.icns")
     win = masked(256)
     win.save(HERE / "lull.ico", sizes=[(16, 16), (20, 20), (24, 24), (32, 32), (40, 40), (48, 48), (64, 64), (128, 128), (256, 256)])
-    print("wrote icon-1024.png, lull.icns, lull.ico")
+    # Embedded in the app for the Windows tray and window icons.
+    masked(32).save(HERE / "icon-32.png")
+    masked(64).save(HERE / "icon-64.png")
+    print("wrote icon-1024.png, lull.icns, lull.ico, icon-32.png, icon-64.png")
 
 
 if __name__ == "__main__":

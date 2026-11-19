@@ -881,7 +881,31 @@ impl Painter {
     }
 }
 
-/// Renders the tray icon (three wave bars) as RGBA.
+/// The app icon from an embedded PNG, as straight-alpha RGBA plus its size.
+/// `dim` fades it towards grey (used in the tray while the sound is stopped).
+pub fn app_icon_rgba(png: &[u8], dim: bool) -> (Vec<u8>, u32, u32) {
+    let pix = Pixmap::decode_png(png).expect("embedded icon");
+    let (w, h) = (pix.width(), pix.height());
+    let rgba = pix
+        .pixels()
+        .iter()
+        .flat_map(|p| {
+            let c = p.demultiply();
+            let (r, g, b) = (c.red() as f32, c.green() as f32, c.blue() as f32);
+            if dim {
+                let grey = 0.3 * r + 0.59 * g + 0.11 * b;
+                let mix = |v: f32| (v + (grey - v) * 0.75) as u8;
+                [mix(r), mix(g), mix(b), c.alpha()]
+            } else {
+                [c.red(), c.green(), c.blue(), c.alpha()]
+            }
+        })
+        .collect();
+    (rgba, w, h)
+}
+
+/// Renders the macOS menu bar icon (three wave bars, template image) as RGBA.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub fn tray_icon_rgba(size: u32, playing: bool, template: bool) -> Vec<u8> {
     let mut p = Painter::with_font(epaint_default_fonts::HACK_REGULAR, 1.0);
     p.pix = Pixmap::new(size, size).unwrap();
@@ -984,6 +1008,8 @@ mod tests {
             assert!(out.iter().any(|&c| c != out[0]));
         }
         assert_eq!(tray_timer_rgba(32, "25", Phase::Focus, true).len(), 32 * 32 * 4);
+        let (rgba, w, h) = app_icon_rgba(include_bytes!("../assets/icon-32.png"), true);
+        assert_eq!((rgba.len(), w, h), (32 * 32 * 4, 32, 32));
     }
 
     /// `LULL_PREVIEW=dir cargo test preview -- --ignored` renders PNGs.

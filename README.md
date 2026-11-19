@@ -17,6 +17,8 @@
 | macOS 11+ (Apple Silicon / Intel) | `Lull-macos-universal.zip` | 展開して `Lull.app` を「アプリケーション」へ移動して起動 |
 
 インストーラーはありません。起動するとタスクトレイ（macOS はメニューバー）にアイコンが出ます。
+Windows ではトレイに Lull のアイコンが出て、音を止めているあいだは灰色になります。
+macOS のメニューバーには、ほかのアプリと同じく白黒の波形アイコンが出ます。
 
 macOS 版は GitHub Actions でビルドとテストを通していますが、実機での動作確認はまだです。
 うまく動かない場合は [Issues](https://github.com/shirumono42/lull/issues) で教えてください。
@@ -186,6 +188,7 @@ cargo build --release
   パネルは標準ウィンドウ（macOS 15 は 12 pt、macOS 26 は 16 pt）、画面上のタイマーは HUD パネル（10 pt / 15 pt、Size に比例）と同じで、
   角は Apple の連続曲線（continuous corner）で丸め、影もその形に沿います。Windows 11 では OS 標準の角丸を使います。
 - アプリのアイコンは `assets/make_icon.py` で生成しています（Apple のアイコングリッド：1024 px のキャンバスに 824 px の本体、連続曲線の角）。
+  Windows では実行ファイル・トレイ・パネルとタイマーのウィンドウ（Alt+Tab など）に、macOS ではアプリ本体（Finder・Dock 表示用）に使っています。
 
 ## License
 
